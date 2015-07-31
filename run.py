@@ -7,9 +7,7 @@ def main():
     puller = Puller()
     puller.listen(8777)
     logger.info('Starting Puller instance......')
-    mainloop=ioloop.IOLoop.instance()
-    mainloop.start()
-
+    ioloop.IOLoop.instance().start()
 
 if __name__ == '__main__':
     main()

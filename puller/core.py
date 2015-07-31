@@ -17,18 +17,16 @@ now = datetime.datetime.now
 class Puller(tcpserver.TCPServer):
     device_dict = {}
 
-
     def handle_stream(self, stream, address):
         logger.info('New connection from %s' % str(address))
-        self.handle_registration(stream, address)
-
+        self.handle_registration(stream, address)                  # 处理设备的首次连接，当注册
 
     @gen.coroutine
     def handle_registration(self, stream, address):
         try:
             # receives the 21-byte registration info and proceeds.
             # Otherwise yield and keep waiting.
-            message = yield stream.read_bytes(21)
+            message = yield stream.read_bytes(21)                  # 读取设备首次上报的信息（非阻塞化）
 
             # unpacks the received bytes into phone number, IP addr.
             reg_data = struct.unpack('!I11scIc',message)
@@ -37,19 +35,69 @@ class Puller(tcpserver.TCPServer):
             logger.info('Registered device(%s)' % phone)
 
             # adds this new device into database.
-            device = Device(18, phone, stream)
+            device = Device(18, phone, stream)                     # 这3行用sqlalchemy将device信息存入数据库
             session.add(device)
             session.commit()
-            self.device_dict[device.portid] = device
+            self.device_dict[device.portid] = device               # 同时信息保存一份到device_dict
 
         except Exception as e:
-            logger.exception('Register device(%s) failed' % phone)
+            logger.exception('Register device(%s) failed' % phone) # 一旦注册这一步异常，则do nothing next
             logger.exception('In handle_registration %s' % e)
         else:
             logger.info('[Device list] %s' % self.device_dict.keys())
             device.colltype = 'R'
-            self.handle_device(device)
+            self.handle_device(device)                             # 注册成功后的下一步操作
 
+    @gen.coroutine 
+    def handle_device(self, device, chktime=None):
+        action = device.colltype or 'R'
+        cmd = None
+        try:
+            # get msg from rabbitmq.
+            # process the msg.
+
+            if action == 'R':
+                timestamp = now()
+
+                data = yield self.collect_data(device, 4)
+                # Ensures we only store data in a interval of 1 minute.
+
+                if not device.chktime or (timestamp.minute != device.chktime.minute):
+                    device.chktime = timestamp
+                    logger.info("storing data")
+                    #devdata = DeviceData(data)
+                    #device.devdata.append(devdata)
+                    #session.add(device)
+                    #session.commit()
+
+                logger.info('[Parsed data] %s' % data)
+                delay = 60 - timestamp.second
+                if delay > 55:
+                    # This is only for keeping the connection alive.
+                    # The data returned is not meant to be stored in database.
+                    self.io_loop.call_later(55, self.handle_device, device)
+                else:
+                    self.io_loop.call_later(delay, self.handle_device, device)
+
+            elif action == 'C':
+                yield self.send_cmd(device, cmd)
+                self.io_loop.add_callback(self.handle_device, device)
+
+            elif action == 'H':
+                chktime = chktime
+                yield self.collect_data(device, 4, chktime=chktime)
+                device.chktime = chktime
+                # request history data from device right in the next iteration.
+                #devdata = DeviceData(data)
+                #device.devdata.append(devdata)
+                #session.add(device)
+                #session.commit()
+                chktime += datetime.timedelta(0,60,0)
+                self.io_loop.add_callback(self.handle_device, device, chktime)
+
+        except Exception as e:
+            logger.exception(str(e))
+            raise e                       # 通过raise唤醒阻塞处，返回值给阻塞调用者，而不是用return
 
     @gen.coroutine
     def collect_data(self, device, data_type, interval=1, chktime=None):
@@ -109,56 +157,3 @@ class Puller(tcpserver.TCPServer):
             self.device_dict.pop(device.portid)
             device.online = False
 
-
-    @gen.coroutine 
-    def handle_device(self, device, chktime=None):
-        action = device.colltype or 'R'
-        cmd = None
-        try:
-            # get msg from rabbitmq.
-            # process the msg.
-
-            if action == 'R':
-                timestamp = now()
-
-                data = yield self.collect_data(device, 4)
-                # Ensures we only store data in a interval of 1 minute.
-
-                if not device.chktime or (timestamp.minute != device.chktime.minute):
-                    device.chktime = timestamp
-                    logger.info("storing data")
-                    #devdata = DeviceData(data)
-                    #device.devdata.append(devdata)
-                    #session.add(device)
-                    #session.commit()
-
-                logger.info('[Parsed data] %s' % data)
-                delay = 60 - timestamp.second
-                if delay > 55:
-                    # This is only for keeping the connection alive.
-                    # The data returned is not meant to be stored in database.
-                    self.io_loop.call_later(55, self.handle_device, device)
-                else:
-                    self.io_loop.call_later(delay, self.handle_device, device)
-
-            elif action == 'C':
-                yield self.send_cmd(device, cmd)
-                self.io_loop.add_callback(self.handle_device, device)
-
-            elif action == 'H':
-                chktime = chktime
-                yield self.collect_data(device, 4, chktime=chktime)
-                device.chktime = chktime
-                # request history data from device right in the next iteration.
-                #devdata = DeviceData(data)
-                #device.devdata.append(devdata)
-                #session.add(device)
-                #session.commit()
-                chktime += datetime.timedelta(0,60,0)
-                self.io_loop.add_callback(self.handle_device, device, chktime)
-
-        except Exception as e:
-            logger.exception(str(e))
-            raise e
-
-        
